@@ -371,8 +371,8 @@ PAGINA = """<!doctype html>
   h1 { font-size: 1.9rem; margin: 0 0 .3rem; letter-spacing: -.02em; color: var(--acento-oscuro); }
   header p { margin: 0; color: var(--texto-tenue); }
   main { flex: 1; max-width: 40rem; width: 100%; margin: 0 auto;
-         padding: 1.25rem 1.25rem 3rem; display: flex; flex-direction: column;
-         gap: 1rem; }
+         padding: 1.25rem 1.25rem 3rem; display: flex; flex-direction: column; }
+  .columnas { display: flex; flex-direction: column; gap: 1rem; }
   .tarjeta { background: var(--superficie); border: 1px solid var(--borde);
              border-radius: 1rem; padding: 1.25rem;
              box-shadow: 0 1px 2px rgba(33, 31, 51, .04), 0 8px 24px rgba(33, 31, 51, .05);
@@ -380,6 +380,7 @@ PAGINA = """<!doctype html>
   textarea { width: 100%; min-height: 9rem; resize: vertical; padding: .85rem;
              font: inherit; line-height: 1.55; border: 1px solid var(--borde);
              border-radius: .75rem; background: var(--bg); color: inherit; }
+  #entrada, #salida { flex: 1; }
   textarea:focus { outline: none; border-color: var(--acento); background: var(--superficie);
                    box-shadow: 0 0 0 3px var(--acento-tenue); }
   .tonos { display: flex; flex-wrap: wrap; gap: .5rem; }
@@ -403,6 +404,13 @@ PAGINA = """<!doctype html>
             font-size: .9rem; transition: background .15s; }
   #copiar:hover { background: var(--acento-tenue); }
   .oculto { display: none !important; }
+
+  @media (min-width: 860px) {
+    header, main { max-width: 68rem; }
+    .columnas { flex-direction: row; align-items: stretch; }
+    .columnas > .tarjeta { flex: 1 1 0; min-width: 0; }
+    textarea { min-height: 22rem; }
+  }
 </style>
 </head>
 <body>
@@ -411,20 +419,22 @@ PAGINA = """<!doctype html>
     <p>Pega tu texto, elige un tono y dale vida.</p>
   </header>
   <main>
-    <div class="tarjeta">
-      <textarea id="entrada" placeholder="Pega aquí el texto que quieres humanizar..."></textarea>
-      <div class="tonos" id="tonos">
-        <button type="button" class="tono activo" data-tono="formal">Formal</button>
-        <button type="button" class="tono" data-tono="cientifico">Científico</button>
-        <button type="button" class="tono" data-tono="tarea">Tarea</button>
-        <button type="button" class="tono" data-tono="casual">Casual</button>
+    <div class="columnas">
+      <div class="tarjeta">
+        <textarea id="entrada" placeholder="Pega aquí el texto que quieres humanizar..."></textarea>
+        <div class="tonos" id="tonos">
+          <button type="button" class="tono activo" data-tono="formal">Formal</button>
+          <button type="button" class="tono" data-tono="cientifico">Científico</button>
+          <button type="button" class="tono" data-tono="tarea">Tarea</button>
+          <button type="button" class="tono" data-tono="casual">Casual</button>
+        </div>
+        <button id="humanizar" type="button">Humanizar</button>
+        <p id="error"></p>
       </div>
-      <button id="humanizar" type="button">Humanizar</button>
-      <p id="error"></p>
-    </div>
-    <div id="resultado" class="tarjeta oculto">
-      <textarea id="salida" readonly placeholder="Tu texto humanizado aparecerá aquí..."></textarea>
-      <button id="copiar" type="button">Copiar resultado</button>
+      <div id="resultado" class="tarjeta oculto">
+        <textarea id="salida" readonly placeholder="Tu texto humanizado aparecerá aquí..."></textarea>
+        <button id="copiar" type="button">Copiar resultado</button>
+      </div>
     </div>
   </main>
 <script>
