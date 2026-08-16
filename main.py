@@ -1,40 +1,40 @@
 """
-LLMario — un agente con personalidad propia, todo en un archivo.
+Copyright Mario Aguirre Rivera. Licenciado bajo PolyForm Noncommercial 1.0.0
+(https://polyformproject.org/licenses/noncommercial/1.0.0). Ver LICENSE.
+
+Blemish — un humanizador de texto con personalidad, todo en un archivo.
+
+El usuario pega un texto, elige un tono de salida (Formal, Científico, Tarea
+o Casual) y recibe una versión "humanizada": reescrita para sonar escrita por
+una persona, con el registro pedido y sin cambiar el significado.
 
 Estructura, de arriba a abajo:
 
-  1. Configuración: modelo, umbral de similitud, límite de vueltas
-  2. Contenido: personalidad.md (tu voz), negocio.json (tus datos) e
-     indice.sqlite (tu corpus, generado por ingesta.py desde biblioteca/ y docs/)
-  3. Las tres herramientas: buscar_en_corpus, calcular_precio, consultar_stock
-  4. El loop del agente, con límite de vueltas y excepciones convertidas en texto
-  5. La API: POST /preguntar, GET /health, GET /
-
-Para hacerlo tuyo (ver README.md):
-  - personalidad.md  → escribe quién eres y cómo hablas
-  - negocio.json     → tus productos o servicios, precios, stock y descuentos
-  - biblioteca/      → tus libros y documentos (PDF, EPUB, DOCX, DOC, TXT, MD)
-  - docs/*.md        → tus notas sueltas
-  - python ingesta.py → genera indice.sqlite desde biblioteca/ y docs/ (usa GEMINI_API_KEY)
+  1. Configuración: modelo, umbral de similitud, temperatura y tonos
+  2. Contenido: personalidad.md (la voz) e indice.sqlite (la base de
+     referencia, generada por ingesta.py desde referencia/ y docs/)
+  3. Referencias: búsqueda vectorial de fragmentos de estilo para imitar
+  4. Sesiones: máximo 4 concurrentes, con cierre por inactividad
+  5. El humanizador: una sola llamada al modelo, sin herramientas ni historial
+  6. La API: POST /humanizar, GET /health, GET /
 
 Para correrlo:
-  export GROQ_API_KEY=...
-  export GEMINI_API_KEY=...
+  $env:GROQ_API_KEY = "..."; $env:GEMINI_API_KEY = "..."
   uvicorn main:app --reload
 """
 
-import json
 import os
 import pathlib
 import sqlite3
 import threading
+import time
 import unicodedata
 import uuid
 from typing import Optional
 
 import numpy as np
 import sqlite_vec
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from google import genai
@@ -49,55 +49,83 @@ from pydantic import BaseModel
 MODELO = "openai/gpt-oss-120b"
 MODELO_EMBEDDINGS = "gemini-embedding-001"
 DIMENSIONES = 768
-# Si el mejor fragmento no llega a este parecido, el agente admite que la
-# pregunta no está documentada. 0.68 es un punto de partida: mídelo con
-# preguntas de tu propio corpus (las de adentro suelen quedar arriba de ~0.70
-# y las ajenas abajo de ~0.66) y ajústalo.
-UMBRAL_SIMILITUD = 0.68
-MAX_VUELTAS = 6
-# Cuantos mensajes pasados se recuerdan por conversacion.
-MAX_HISTORIAL = 20
+# Parecido mínimo para tomar un fragmento como referencia de estilo. La base
+# es un corpus de estilo, no de respuestas: un umbral bajo alcanza.
+UMBRAL_SIMILITUD = 0.55
+MAX_REFERENCIAS = 5
+# Un poco alto a propósito: con temperatura 0 el texto sale plano y "de IA",
+# justo lo que este producto quiere evitar.
+TEMPERATURA = 0.7
+
+# Los cuatro tonos de salida. Las claves van sin acentos (científico →
+# cientifico) porque también son valores de API; las etiquetas van con acentos.
+TONOS = {
+    "formal": {
+        "etiqueta": "Formal",
+        "instruccion": (
+            "Registro formal: profesional, neutro y estructurado. Vocabulario "
+            "cuidado y preciso, oraciones completas, sin coloquialismos, "
+            "contracciones ni muletillas."
+        ),
+    },
+    "cientifico": {
+        "etiqueta": "Científico",
+        "instruccion": (
+            "Registro científico: técnico y preciso, con vocabulario académico "
+            "del tema. Impersonal (se observa, se concluye, se demuestra), sin "
+            "adornos, sin opiniones personales y sin coloquialismos."
+        ),
+    },
+    "tarea": {
+        "etiqueta": "Tarea",
+        "instruccion": (
+            "Como una tarea escolar bien hecha: claro, ordenado y directo, con "
+            "vocabulario accesible. Suena a estudiante que entiende el tema, "
+            "sin tecnicismos innecesarios ni florituras."
+        ),
+    },
+    "casual": {
+        "etiqueta": "Casual",
+        "instruccion": (
+            "Registro casual: relajado y coloquial, como si le contaras el "
+            "tema a un amigo. Contracciones y frases cortas con naturalidad, "
+            "sin vulgaridades."
+        ),
+    },
+}
 
 REGLAS = (
-    "Respondes SIEMPRE en primera persona, con la personalidad descrita arriba. "
-    "Usa SIEMPRE las herramientas para datos del negocio o del corpus: nunca "
-    "inventes precios, stock ni información que no esté documentada. Si necesitas "
-    "varios datos, pide varias herramientas a la vez. Responde en español, "
-    "breve y concreto."
+    "Tu trabajo es humanizar texto: reescríbelo para que suene escrito por "
+    "una persona real, conservando TODO el significado, los datos, los "
+    "nombres y las ideas originales. Nunca inventes información, no cambies "
+    "el sentido y no dejes fuera contenido importante. La respuesta es SOLO "
+    "el texto humanizado: sin títulos, sin comentarios, sin explicaciones y "
+    "sin repetir el texto original."
 )
+
+# --- Sesiones: tope de uso y cierre por inactividad --------------------------
+MAX_SESIONES = 4
+TIEMPO_INACTIVIDAD_SESION = 7 * 60  # segundos sin actividad antes de liberar el cupo
 
 
 # =====================================================================================
-# 2. CONTENIDO — lo que hace único a este agente
+# 2. CONTENIDO — la voz y la base de referencia
 # =====================================================================================
 
 DIRECTORIO = pathlib.Path(__file__).parent
 
-# --- La voz: personalidad.md ------------------------------------------------
+# --- La voz: personalidad.md -------------------------------------------------
 ARCHIVO_PERSONALIDAD = DIRECTORIO / "personalidad.md"
 if ARCHIVO_PERSONALIDAD.exists():
     PERSONALIDAD = ARCHIVO_PERSONALIDAD.read_text(encoding="utf-8").strip()
 else:
     PERSONALIDAD = (
-        "No tienes personalidad definida todavía: falta personalidad.md "
-        "(ver README.md). Mientras tanto sé neutral y directo."
+        "Eres Blemish, un humanizador de textos con humor seco y sarcasmo "
+        "cariñoso: no te tomas en serio, pero tu trabajo sí. Reescribes "
+        "textos para que suenen humanos."
     )
 
-INSTRUCCIONES = f"{PERSONALIDAD}\n\n{REGLAS}"
-
-# --- El negocio: negocio.json ------------------------------------------------
-ARCHIVO_NEGOCIO = DIRECTORIO / "negocio.json"
-if ARCHIVO_NEGOCIO.exists():
-    try:
-        NEGOCIO = json.loads(ARCHIVO_NEGOCIO.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        NEGOCIO = None
-        print(f"ADVERTENCIA: negocio.json no es JSON válido: {error}")
-else:
-    NEGOCIO = None
-    print("ADVERTENCIA: falta negocio.json - precio y stock no tienen datos.")
-
-# --- El corpus: indice.sqlite, generado por ingesta.py ---------------------------
+# --- La base de referencia: indice.sqlite, generado por ingesta.py -------------
 ARCHIVO_INDICE = DIRECTORIO / "indice.sqlite"
 _db = None
 _db_lock = threading.Lock()
@@ -107,88 +135,74 @@ if ARCHIVO_INDICE.exists():
     sqlite_vec.load(_db)
     _db.enable_load_extension(False)
 else:
-    print("ADVERTENCIA: falta indice.sqlite - corre 'python ingesta.py' con tu GEMINI_API_KEY.")
-
-# --- Conversaciones: historial por chat_id, en su propio SQLite ---------------
-ARCHIVO_CONVERSACIONES = DIRECTORIO / "conversaciones.sqlite"
-_db_conv = None
-_db_conv_lock = threading.Lock()
-try:
-    _db_conv = sqlite3.connect(ARCHIVO_CONVERSACIONES, check_same_thread=False)
-    _db_conv.execute(
-        "CREATE TABLE IF NOT EXISTS mensajes ("
-        " id INTEGER PRIMARY KEY,"
-        " chat_id TEXT NOT NULL,"
-        " rol TEXT NOT NULL,"
-        " contenido TEXT NOT NULL,"
-        " creado_en TEXT DEFAULT (datetime('now')))"
+    print(
+        "ADVERTENCIA: falta indice.sqlite - la base de referencia estará "
+        "vacía. Corre 'python ingesta.py' con tu GEMINI_API_KEY."
     )
-    _db_conv.execute("CREATE INDEX IF NOT EXISTS idx_mensajes_chat ON mensajes(chat_id, id)")
-    _db_conv.commit()
-except sqlite3.Error as error:
-    _db_conv = None
-    print(f"ADVERTENCIA: no se pudo abrir conversaciones.sqlite: {error}")
 
 # --- Clientes (las claves pueden faltar en desarrollo) ------------------------
 try:
     cliente = Groq(api_key=os.environ["GROQ_API_KEY"])
 except KeyError:
     cliente = None
-    print("ADVERTENCIA: falta GROQ_API_KEY - el agente fallará hasta configurarla.")
+    print("ADVERTENCIA: falta GROQ_API_KEY - /humanizar fallará hasta configurarla.")
 
 try:
     cliente_gemini = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 except KeyError:
     cliente_gemini = None
-    print("ADVERTENCIA: falta GEMINI_API_KEY - la búsqueda en el corpus fallará.")
+    print("ADVERTENCIA: falta GEMINI_API_KEY - no habrá textos de referencia.")
 
 
 # =====================================================================================
-# 3. LAS HERRAMIENTAS
+# SESIONES — tope de MAX_SESIONES concurrentes, cierre por inactividad
+# =====================================================================================
+
+SESIONES = {}  # session_id -> timestamp de última actividad
+_sesiones_lock = threading.Lock()
+
+
+def _permitir_sesion(session_id):
+    """Registra (o actualiza) una sesión. Devuelve (permitida, mensaje de rechazo)."""
+    ahora = time.time()
+    with _sesiones_lock:
+        # Libera los cupos de las sesiones que llevan demasiado sin actividad.
+        for sid in list(SESIONES):
+            if ahora - SESIONES[sid] > TIEMPO_INACTIVIDAD_SESION:
+                del SESIONES[sid]
+
+        if session_id in SESIONES:
+            SESIONES[session_id] = ahora
+            return True, ""
+
+        if len(SESIONES) >= MAX_SESIONES:
+            return False, (
+                f"Máximo {MAX_SESIONES} sesiones activas. Espera a que se "
+                "libere una e inténtalo de nuevo."
+            )
+
+        SESIONES[session_id] = ahora
+        return True, ""
+
+
+# =====================================================================================
+# 3. REFERENCIAS — fragmentos de estilo desde indice.sqlite
 # =====================================================================================
 
 
-def _normalizar(texto):
-    """Minúsculas, sin acentos ni signos: 'Flor de Fuego' → 'flordefuego'."""
+def _normalizar_tono(texto):
+    """'Científico' → 'cientifico': minúsculas y sin acentos."""
     texto = unicodedata.normalize("NFD", texto.lower())
-    texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
-    return "".join(c for c in texto if c.isalnum())
+    return "".join(c for c in texto if unicodedata.category(c) != "Mn")
 
 
-def _buscar_articulo(texto):
-    """Encuentra un artículo de negocio.json por clave o nombre, con tolerancia."""
-    if not NEGOCIO:
-        return None
-    buscado = _normalizar(texto)
-    for articulo in NEGOCIO.get("articulos", []):
-        candidatos = {_normalizar(articulo["clave"]), _normalizar(articulo["nombre"])}
-        if any(buscado == c or c in buscado or buscado in c for c in candidatos):
-            return articulo
-    return None
-
-
-def _buscar_descuento(texto):
-    """Encuentra un descuento de negocio.json por clave o nombre, con tolerancia."""
-    if not NEGOCIO:
-        return None
-    buscado = _normalizar(texto)
-    for descuento in NEGOCIO.get("descuentos", []):
-        candidatos = {_normalizar(descuento["clave"]), _normalizar(descuento["nombre"])}
-        if any(buscado == c or c in buscado or buscado in c for c in candidatos):
-            return descuento
-    return None
-
-
-def buscar_en_corpus(consulta):
-    """Busca en la biblioteca y devuelve los 3 fragmentos más parecidos."""
+def buscar_referencias(texto):
+    """Devuelve fragmentos de estilo de la base de referencia, ya formateados."""
     if _db is None or cliente_gemini is None:
-        return (
-            "Todavía no tengo documentos: corre 'python ingesta.py' con tu "
-            "GEMINI_API_KEY para generar indice.sqlite desde biblioteca/."
-        )
+        return []
     respuesta = cliente_gemini.models.embed_content(
         model=MODELO_EMBEDDINGS,
-        contents=consulta,
+        contents=texto,
         config=types.EmbedContentConfig(
             task_type="RETRIEVAL_QUERY",
             output_dimensionality=DIMENSIONES,
@@ -203,325 +217,68 @@ def buscar_en_corpus(consulta):
             "SELECT f.fuente, f.titulo, f.pagina, f.texto, v.distance "
             "FROM vec_fragmentos v "
             "JOIN fragmentos f ON f.id = v.rowid "
-            "WHERE v.embedding MATCH ? AND k = 3 "
+            "WHERE v.embedding MATCH ? AND k = ? "
             "ORDER BY v.distance",
-            (blob,),
+            (blob, MAX_REFERENCIAS),
         ).fetchall()
 
-    if not filas:
-        return "No encontré información sobre eso en mis documentos."
-
-    if 1 - filas[0][4] < UMBRAL_SIMILITUD:
-        return "No encontré información sobre eso en mis documentos."
-
-    partes = []
-    for fuente, titulo, pagina, texto, distancia in filas:
+    referencias = []
+    for fuente, titulo, pagina, texto_fragmento, distancia in filas:
+        if 1 - distancia < UMBRAL_SIMILITUD:
+            continue
         etiqueta = f"{fuente} — {titulo}"
         if pagina:
             etiqueta += f", p. {pagina}"
-        partes.append(
-            f"[fuente: {etiqueta} | parecido: {1 - distancia:.2f}]\n{texto}"
-        )
-    return "\n\n".join(partes)
-
-
-def calcular_precio(articulo, descuento=None):
-    """Devuelve el desglose del precio de un artículo o servicio, línea por línea."""
-    if NEGOCIO is None:
-        return "No tengo datos del negocio todavía: falta negocio.json (ver README.md)."
-
-    encontrado = _buscar_articulo(articulo)
-    if encontrado is None:
-        lista = ", ".join(
-            f"{a['clave']} ({a['nombre']})" for a in NEGOCIO.get("articulos", [])
-        )
-        lista = lista or "ninguno todavía"
-        return f"No conozco '{articulo}'. Artículos disponibles: {lista}."
-
-    simbolo = NEGOCIO.get("simbolo", "$")
-    base = encontrado["precio"]
-    lineas = [
-        f"{encontrado['clave']} — {encontrado['nombre']}",
-        f"  {'Precio base':<34} {simbolo}{base:>9,.2f}",
-    ]
-
-    monto_descuento = 0.0
-    if descuento:
-        encontrado_desc = _buscar_descuento(descuento)
-        if encontrado_desc is None:
-            lista_desc = ", ".join(
-                d["nombre"] for d in NEGOCIO.get("descuentos", [])
-            )
-            lista_desc = lista_desc or "ninguno definido"
-            return f"No existe el descuento '{descuento}'. Descuentos disponibles: {lista_desc}."
-        monto_descuento = base * encontrado_desc["porcentaje"]
-        etiqueta = f"{encontrado_desc['nombre']} ({encontrado_desc['porcentaje']:.0%})"
-        lineas.append(f"  {etiqueta:<34}-{simbolo}{monto_descuento:>9,.2f}")
-
-    subtotal = base - monto_descuento
-    impuesto_pct = NEGOCIO.get("impuesto", 0.0)
-    impuesto = subtotal * impuesto_pct
-    total = subtotal + impuesto
-
-    lineas.append(f"  {'Subtotal':<34} {simbolo}{subtotal:>9,.2f}")
-    if impuesto_pct:
-        lineas.append(
-            f"  {'Impuesto ({:.0%})'.format(impuesto_pct):<34} {simbolo}{impuesto:>9,.2f}"
-        )
-    lineas.append("  " + "-" * 45)
-    lineas.append(f"  {'TOTAL A PAGAR':<34} {simbolo}{total:>9,.2f}")
-    return "\n".join(lineas)
-
-
-# En clase esta constante se cambia en vivo para ver fallar al agente.
-# En el servidor desplegado se queda en "ok".
-ESCENARIO = "ok"  # "ok" | "timeout" | "error500"
-
-
-def consultar_stock(articulo):
-    """Consulta cuántas unidades quedan. Simula el inventario del negocio."""
-    if ESCENARIO == "timeout":
-        raise TimeoutError("El sistema de inventario no respondió (timeout de 5 s).")
-    if ESCENARIO == "error500":
-        raise RuntimeError("HTTP 500 del sistema de inventario. Intenta de nuevo.")
-
-    if NEGOCIO is None:
-        return "No tengo datos del negocio todavía: falta negocio.json (ver README.md)."
-
-    encontrado = _buscar_articulo(articulo)
-    if encontrado is None:
-        lista = ", ".join(
-            f"{a['clave']} ({a['nombre']})" for a in NEGOCIO.get("articulos", [])
-        )
-        lista = lista or "ninguno todavía"
-        return f"No conozco '{articulo}'. Artículos disponibles: {lista}."
-
-    stock = encontrado.get("stock")
-    if stock is None:
-        return f"{encontrado['clave']}: siempre disponible."
-
-    total = encontrado.get("total")
-    if stock == 0:
-        nombre = f"{encontrado['clave']} ({encontrado['nombre']})"
-        return f"{nombre}: SIN STOCK por ahora."
-    if total:
-        return f"{encontrado['clave']}: {stock} disponibles de {total}."
-    return f"{encontrado['clave']}: {stock} disponibles."
-
-
-ESQUEMA_HERRAMIENTAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "buscar_en_corpus",
-            "description": (
-                "Busca en los documentos propios del negocio (docs/): historia, "
-                "servicios, reglas, formas de contacto, preguntas frecuentes. Úsala "
-                "para cualquier pregunta de fondo o detalles. No sirve para calcular "
-                "precios ni para consultar stock."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "consulta": {
-                        "type": "string",
-                        "description": (
-                            "Qué quieres buscar, redactado como una frase completa. "
-                            "Por ejemplo: 'qué incluye el servicio de mantenimiento'."
-                        ),
-                    }
-                },
-                "required": ["consulta"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "calcular_precio",
-            "description": (
-                "Calcula el precio de un artículo o servicio con el desglose línea "
-                "por línea: base, descuento (si aplica), subtotal, impuesto y total. "
-                "Úsala siempre que pregunten un precio o cuánto sale algo. Nunca "
-                "calcules de memoria."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "articulo": {
-                        "type": "string",
-                        "description": "Artículo o servicio a cotizar, por ejemplo 'EJEMPLO-01' o 'producto de ejemplo'.",
-                    },
-                    "descuento": {
-                        "type": "string",
-                        "description": (
-                            "Descuento a aplicar. Omite este parámetro si la persona "
-                            "no menciona ninguno."
-                        ),
-                    },
-                },
-                "required": ["articulo"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "consultar_stock",
-            "description": (
-                "Consulta cuántas unidades quedan de un artículo o servicio. Es el "
-                "único dato que cambia seguido, así que consúltalo siempre que "
-                "pregunten si hay disponible o si quedan existencias."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "articulo": {
-                        "type": "string",
-                        "description": "Artículo a consultar, por ejemplo 'EJEMPLO-01'.",
-                    }
-                },
-                "required": ["articulo"],
-            },
-        },
-    },
-]
-
-HERRAMIENTAS = {
-    "buscar_en_corpus": buscar_en_corpus,
-    "calcular_precio": calcular_precio,
-    "consultar_stock": consultar_stock,
-}
+        referencias.append(f"[fuente: {etiqueta}]\n{texto_fragmento}")
+    return referencias
 
 
 # =====================================================================================
-# 4. EL AGENTE — loop con límite de vueltas y errores convertidos en texto
+# 4. EL HUMANIZADOR — una llamada al modelo, sin herramientas ni historial
 # =====================================================================================
 
 
-def _cargar_historial(chat_id, limite=MAX_HISTORIAL):
-    """Los ultimos mensajes de una conversacion, del mas viejo al mas nuevo."""
-    if _db_conv is None:
-        return []
-    with _db_conv_lock:
-        filas = _db_conv.execute(
-            "SELECT rol, contenido FROM mensajes "
-            "WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
-            (chat_id, limite),
-        ).fetchall()
-    return [{"rol": rol, "contenido": contenido} for rol, contenido in reversed(filas)]
-
-
-def _guardar_mensaje(chat_id, rol, contenido):
-    if _db_conv is None:
-        return
-    with _db_conv_lock:
-        _db_conv.execute(
-            "INSERT INTO mensajes (chat_id, rol, contenido) VALUES (?, ?, ?)",
-            (chat_id, rol, contenido),
-        )
-        _db_conv.commit()
-
-
-def correr_agente(pregunta, historial=None):
-    """Corre el loop y devuelve (respuesta, trayectoria, vueltas)."""
+def humanizar(texto, tono):
+    """Reescribe `texto` en el tono elegido. Devuelve (texto, nº de referencias)."""
     if cliente is None:
         raise RuntimeError(
             "Falta GROQ_API_KEY en el entorno. Configúrala y reinicia el servidor."
         )
-    mensajes = [{"role": "system", "content": INSTRUCCIONES}]
-    for mensaje in historial or []:
-        mensajes.append({"role": mensaje["rol"], "content": mensaje["contenido"]})
-    mensajes.append({"role": "user", "content": pregunta})
-    trayectoria = []
-    vuelta = 0
 
-    while vuelta < MAX_VUELTAS:
-        vuelta += 1
+    tono = _normalizar_tono(tono)
+    if tono not in TONOS:
+        raise ValueError(f"Tono desconocido: '{tono}'. Válidos: {', '.join(TONOS)}")
 
-        respuesta = cliente.chat.completions.create(
-            model=MODELO,
-            messages=mensajes,
-            tools=ESQUEMA_HERRAMIENTAS,
-            temperature=0,
-            seed=42,
-            include_reasoning=False,
-        )
-        mensaje = respuesta.choices[0].message
-
-        mensajes.append(
-            {
-                "role": "assistant",
-                "content": mensaje.content,
-                "tool_calls": [
-                    {
-                        "id": llamada.id,
-                        "type": "function",
-                        "function": {
-                            "name": llamada.function.name,
-                            "arguments": llamada.function.arguments,
-                        },
-                    }
-                    for llamada in (mensaje.tool_calls or [])
-                ],
-            }
-        )
-
-        if not mensaje.tool_calls:
-            return mensaje.content, trayectoria, vuelta
-
-        for llamada in mensaje.tool_calls:
-            nombre = llamada.function.name
-
-            # Todo lo que pueda tronar, truena aquí adentro y sale como texto:
-            # argumentos mal formados, herramienta inexistente, servicio caído.
-            try:
-                argumentos = json.loads(llamada.function.arguments)
-                resultado = HERRAMIENTAS[nombre](**argumentos)
-            except Exception as error:
-                argumentos = {"_sin_parsear": llamada.function.arguments}
-                resultado = f"ERROR al ejecutar {nombre}: {type(error).__name__}: {error}"
-
-            trayectoria.append(
-                {"vuelta": vuelta, "herramienta": nombre, "argumentos": argumentos}
-            )
-            mensajes.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": llamada.id,
-                    "name": nombre,
-                    "content": resultado,
-                }
-            )
-
-    # Se acabaron las vueltas: una última llamada sin herramientas, para abstenerse bien.
-    mensajes.append(
-        {
-            "role": "user",
-            "content": (
-                "Ya no puedes usar más herramientas. Responde con la información que SÍ "
-                "lograste obtener y di claramente qué dato no pudiste conseguir y por qué. "
-                "No inventes el dato que falta."
-            ),
-        }
+    sistema = (
+        f"{PERSONALIDAD}\n\n{REGLAS}\n\n"
+        f"Tono de salida elegido por el usuario:\n{TONOS[tono]['instruccion']}"
     )
+    referencias = buscar_referencias(texto)
+    if referencias:
+        sistema += (
+            "\n\nTextos de referencia para imitar su estilo (imita el "
+            "registro, nunca el contenido):\n\n"
+            + "\n\n".join(referencias)
+        )
+
     respuesta = cliente.chat.completions.create(
         model=MODELO,
-        messages=mensajes,
-        temperature=0,
-        seed=42,
-        include_reasoning=False,
+        messages=[
+            {"role": "system", "content": sistema},
+            {"role": "user", "content": f"Humaniza este texto:\n\n{texto}"},
+        ],
+        temperature=TEMPERATURA,
     )
-    return respuesta.choices[0].message.content, trayectoria, vuelta
+    return respuesta.choices[0].message.content.strip(), len(referencias)
 
 
 # =====================================================================================
 # 5. LA API
 # =====================================================================================
 
-app = FastAPI(title="LLMario")
+app = FastAPI(title="Blemish")
 
-# Abierto a propósito: el cliente de Streamlit corre en localhost, en otra máquina.
+# Abierto en desarrollo: permite probar la página desde otro puerto o máquina.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -531,26 +288,52 @@ app.add_middleware(
 
 
 class Peticion(BaseModel):
-    pregunta: str
-    chat_id: Optional[str] = None
+    texto: str
+    tono: str = "formal"
+    session_id: Optional[str] = None
 
 
 class Respuesta(BaseModel):
-    respuesta: str
-    trayectoria: list
-    vueltas: int
-    chat_id: str
+    texto_humanizado: str
+    tono: str
+    referencias_usadas: int
+    session_id: str
 
 
-@app.post("/preguntar", response_model=Respuesta)
-def preguntar(peticion: Peticion):
-    """Pregunta con memoria: con chat_id continúa la conversación; sin él, crea una."""
-    chat_id = peticion.chat_id or uuid.uuid4().hex
-    historial = _cargar_historial(chat_id)
-    contenido, trayectoria, vueltas = correr_agente(peticion.pregunta, historial)
-    _guardar_mensaje(chat_id, "user", peticion.pregunta)
-    _guardar_mensaje(chat_id, "assistant", contenido)
-    return Respuesta(respuesta=contenido, trayectoria=trayectoria, vueltas=vueltas, chat_id=chat_id)
+@app.post("/humanizar", response_model=Respuesta)
+def humanizar_endpoint(peticion: Peticion):
+    """Texto pegado → versión humanizada en el tono elegido."""
+    if not peticion.texto.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="El texto está vacío: pega algo para humanizar.",
+        )
+
+    tono = _normalizar_tono(peticion.tono)
+    if tono not in TONOS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tono desconocido: '{peticion.tono}'. Válidos: {', '.join(TONOS)}.",
+        )
+
+    session_id = peticion.session_id or uuid.uuid4().hex
+    permitida, mensaje = _permitir_sesion(session_id)
+    if not permitida:
+        raise HTTPException(status_code=429, detail=mensaje)
+
+    try:
+        texto_humanizado, cuantas = humanizar(peticion.texto, tono)
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error))
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Error al humanizar: {type(error).__name__}: {error}")
+
+    return Respuesta(
+        texto_humanizado=texto_humanizado,
+        tono=tono,
+        referencias_usadas=cuantas,
+        session_id=session_id,
+    )
 
 
 @app.get("/health")
@@ -564,87 +347,120 @@ PAGINA = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LLMario 💀</title>
+<title>Blemish — humaniza tu texto</title>
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
-  body { font-family: system-ui, sans-serif; height: 100vh; margin: 0;
+  body { font-family: system-ui, sans-serif; min-height: 100vh; margin: 0;
          display: flex; flex-direction: column; }
-  h1 { font-size: 1.4rem; color: #e52521; text-align: center; margin: 1rem 0 .5rem; }
-  #chat { flex: 1; overflow-y: auto; padding: 0 1rem 1rem; display: flex;
-          flex-direction: column; gap: .6rem; max-width: 46rem; width: 100%;
-          margin: 0 auto; }
-  .msg { max-width: 85%; padding: .6rem .9rem; border-radius: 1rem;
-         white-space: pre-wrap; line-height: 1.5; }
-  .msg.user { align-self: flex-end; background: #e52521; color: #fff;
-              border-bottom-right-radius: .25rem; }
-  .msg.asistente { align-self: flex-start; background: #8882;
-                   border-bottom-left-radius: .25rem; }
-  .msg.pensando { align-self: flex-start; opacity: .6; font-style: italic;
-                  background: transparent; }
-  form { display: flex; gap: .5rem; padding: 1rem; max-width: 46rem;
-         width: 100%; margin: 0 auto; }
-  input { flex: 1; padding: .75rem; font-size: 1rem; border: 1px solid #8888;
-          border-radius: 1.5rem; background: transparent; color: inherit; }
-  button { padding: .75rem 1.4rem; font-size: 1rem; border: 0; border-radius: 1.5rem;
-           background: #e52521; color: #fff; cursor: pointer; }
-  button:disabled { opacity: .5; cursor: wait; }
+  header { max-width: 46rem; width: 100%; margin: 0 auto; padding: 1.25rem 1rem 0; }
+  h1 { font-size: 1.6rem; margin: 0 0 .15rem; }
+  header p { margin: 0; opacity: .75; }
+  main { flex: 1; max-width: 46rem; width: 100%; margin: 0 auto;
+         padding: 1rem 1rem 2rem; display: flex; flex-direction: column;
+         gap: .7rem; }
+  textarea { width: 100%; min-height: 9rem; resize: vertical; padding: .75rem;
+             font: inherit; line-height: 1.5; border: 1px solid #8888;
+             border-radius: .75rem; background: transparent; color: inherit; }
+  .tonos { display: flex; flex-wrap: wrap; gap: .45rem; }
+  .tono { padding: .45rem 1rem; border: 1px solid #8888; border-radius: 1.5rem;
+          background: transparent; color: inherit; cursor: pointer; }
+  .tono.activo { background: #7c5cf0; border-color: #7c5cf0; color: #fff; }
+  #humanizar { padding: .7rem 1.5rem; border: 0; border-radius: 1.5rem;
+               background: #7c5cf0; color: #fff; cursor: pointer; }
+  #humanizar:disabled { opacity: .5; cursor: wait; }
+  #error { display: none; color: #e74c3c; margin: 0; white-space: pre-wrap; }
+  .oculto { display: none !important; }
 </style>
 </head>
 <body>
-  <h1>LLMario 💀</h1>
-
-  <div id="chat"></div>
-
-  <form id="formulario">
-    <input id="pregunta" autofocus autocomplete="off"
-           placeholder="Pregúntale a Mario: ¿qué dice el libro sobre la fotosíntesis?">
-    <button id="boton">Preguntar</button>
-  </form>
-
+  <header>
+    <h1>Blemish</h1>
+    <p>Pega tu texto, elige un tono y dale vida. Ctrl+V pega y Ctrl+Z deshace, como siempre.</p>
+  </header>
+  <main>
+    <textarea id="entrada" placeholder="Pega aquí el texto que quieres humanizar..."></textarea>
+    <div class="tonos" id="tonos">
+      <button type="button" class="tono activo" data-tono="formal">Formal</button>
+      <button type="button" class="tono" data-tono="cientifico">Científico</button>
+      <button type="button" class="tono" data-tono="tarea">Tarea</button>
+      <button type="button" class="tono" data-tono="casual">Casual</button>
+    </div>
+    <button id="humanizar" type="button">Humanizar</button>
+    <p id="error"></p>
+    <textarea id="salida" class="oculto" readonly placeholder="Tu texto humanizado aparecerá aquí..."></textarea>
+    <button id="copiar" type="button" class="oculto">Copiar resultado</button>
+  </main>
 <script>
-const formulario = document.getElementById("formulario");
-const entrada = document.getElementById("pregunta");
-const boton = document.getElementById("boton");
-const chat = document.getElementById("chat");
-let chatId = null;
+const entrada = document.getElementById("entrada");
+const tonos = document.getElementById("tonos");
+const boton = document.getElementById("humanizar");
+const salida = document.getElementById("salida");
+const copiar = document.getElementById("copiar");
+const error = document.getElementById("error");
+let tono = "formal";
+let sessionId = localStorage.getItem("blemish_sesion") ||
+                (crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2)));
+localStorage.setItem("blemish_sesion", sessionId);
 
-function agregarMensaje(clase, texto) {
-  const div = document.createElement("div");
-  div.className = "msg " + clase;
-  div.textContent = texto;
-  chat.appendChild(div);
-  chat.scrollTop = chat.scrollHeight;
-  return div;
-}
+tonos.addEventListener("click", (evento) => {
+  const botonTono = evento.target.closest(".tono");
+  if (!botonTono) return;
+  tonos.querySelectorAll(".tono").forEach((b) => b.classList.remove("activo"));
+  botonTono.classList.add("activo");
+  tono = botonTono.dataset.tono;
+});
 
-formulario.addEventListener("submit", async (evento) => {
-  evento.preventDefault();
-  const pregunta = entrada.value.trim();
-  if (!pregunta) return;
-
-  agregarMensaje("user", pregunta);
-  entrada.value = "";
+async function humanizar() {
+  const texto = entrada.value.trim();
+  if (!texto) {
+    error.textContent = "Pega un texto primero.";
+    error.style.display = "block";
+    return;
+  }
+  error.style.display = "none";
+  salida.classList.add("oculto");
+  copiar.classList.add("oculto");
   boton.disabled = true;
-  const pensando = agregarMensaje("pensando", "Pensando...");
-
   try {
-    const peticion = await fetch("/preguntar", {
+    const peticion = await fetch("/humanizar", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(chatId ? {pregunta, chat_id: chatId} : {pregunta})
+      body: JSON.stringify({texto, tono, session_id: sessionId})
     });
-    if (!peticion.ok) throw new Error("El servidor respondió " + peticion.status);
     const datos = await peticion.json();
-    chatId = datos.chat_id;
-    pensando.remove();
-    agregarMensaje("asistente", datos.respuesta);
-  } catch (error) {
-    pensando.remove();
-    agregarMensaje("asistente", "Aún no tengo datos para responderte sobre ese tema, ¡pero! cuando actualice mi información podremos platicar ampliamente. Por ahora soy una versión bb de lo que voy a llegar a ser. 😅");
+    if (!peticion.ok) {
+      const e = new Error(datos.detail || ("El servidor respondió " + peticion.status));
+      e.status = peticion.status;
+      throw e;
+    }
+    salida.value = datos.texto_humanizado;
+    salida.classList.remove("oculto");
+    copiar.classList.remove("oculto");
+  } catch (err) {
+    error.textContent = (err.status === 429)
+      ? err.message
+      : "Algo salió mal: " + err.message;
+    error.style.display = "block";
   } finally {
     boton.disabled = false;
-    entrada.focus();
+  }
+}
+
+boton.addEventListener("click", humanizar);
+entrada.addEventListener("keydown", (evento) => {
+  // Ctrl+Enter también humaniza; el resto de atajos (Ctrl+Z, Ctrl+V…) quedan nativos.
+  if ((evento.ctrlKey || evento.metaKey) && evento.key === "Enter") humanizar();
+});
+
+copiar.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(salida.value);
+    copiar.textContent = "¡Copiado!";
+    setTimeout(() => { copiar.textContent = "Copiar resultado"; }, 1500);
+  } catch {
+    salida.select();
+    document.execCommand("copy");
   }
 });
 </script>
@@ -655,5 +471,5 @@ formulario.addEventListener("submit", async (evento) => {
 
 @app.get("/", response_class=HTMLResponse)
 def inicio():
-    """Una página mínima para probar el agente desde el navegador, sin instalar nada."""
+    """La página: pegar texto → elegir tono → humanizar."""
     return PAGINA

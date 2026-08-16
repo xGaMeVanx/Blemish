@@ -22,3 +22,6 @@ conversaciones.sqlite
 **/.codewhale/*
 !**/.codewhale/constitution.json
 .deepseek/
+
+# Respaldo local de los documentos originales de referencia (no se versionan)
+_originales_referencia/

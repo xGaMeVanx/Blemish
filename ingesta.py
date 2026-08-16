@@ -1,7 +1,11 @@
 """
+Copyright Mario Aguirre Rivera. Licenciado bajo PolyForm Noncommercial 1.0.0
+(https://polyformproject.org/licenses/noncommercial/1.0.0). Ver LICENSE.
+
 Ingesta de la biblioteca de LLMario — genera indice.sqlite.
 
-Lee archivos de conocimiento desde biblioteca/ y docs/ en estos formatos:
+Lee archivos de conocimiento desde referencia/ (los textos de estilo que
+Blemish imita) y docs/ en estos formatos:
 PDF, EPUB, DOCX, DOC, TXT y Markdown. Extrae el texto, lo trocea en
 fragmentos con solapamiento y lo embebe con Gemini (gemini-embedding-001).
 El resultado es indice.sqlite, una base SQLite con búsqueda vectorial
@@ -36,7 +40,7 @@ from google import genai
 from google.genai import types
 
 DIRECTORIO = pathlib.Path(__file__).parent
-CARPETAS = [DIRECTORIO / "biblioteca", DIRECTORIO / "docs"]
+CARPETAS = [DIRECTORIO / "referencia", DIRECTORIO / "docs"]
 EXTENSIONES = {".pdf", ".epub", ".docx", ".doc", ".txt", ".md"}
 ARCHIVO_SQLITE = DIRECTORIO / "indice.sqlite"
 MODELO = "gemini-embedding-001"
@@ -134,7 +138,9 @@ def _leer_texto(ruta):
 
 def _bloques_markdown(ruta):
     """Secciones '## ' de un .md."""
-    lineas = ruta.read_text(encoding="utf-8").splitlines()
+    # utf-8-sig quita el BOM que agrega el Bloc de notas de Windows; si no,
+    # la primera sección '## ' queda pegada al BOM y se pierde.
+    lineas = ruta.read_text(encoding="utf-8-sig").splitlines()
     secciones = []
     titulo_actual = None
     cuerpo = []
