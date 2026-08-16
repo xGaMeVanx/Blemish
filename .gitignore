@@ -1,0 +1,24 @@
+# Las llaves NUNCA se suben. En Render se cargan como variables de entorno.
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Sistema
+.DS_Store
+
+# Libros y documentos fuente (binarios grandes; se sincronizan con Drive, no se versionan)
+biblioteca/
+
+# Historial de conversaciones (datos de ejecución, no se versionan)
+conversaciones.sqlite
+
+# Carpeta interna del agente CodeWhale
+.codewhale/
+**/.codewhale/*
+!**/.codewhale/constitution.json
+.deepseek/

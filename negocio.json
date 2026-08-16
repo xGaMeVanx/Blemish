@@ -1,0 +1,12 @@
+{
+  "moneda": "MXN",
+  "simbolo": "$",
+  "impuesto": 0.16,
+  "descuentos": [
+    {"clave": "ejemplo-recurrente", "nombre": "Cliente recurrente", "porcentaje": 0.10}
+  ],
+  "articulos": [
+    {"clave": "EJEMPLO-01", "nombre": "Producto de ejemplo", "precio": 500, "stock": 10, "total": 20},
+    {"clave": "EJEMPLO-02", "nombre": "Servicio de ejemplo", "precio": 1200, "stock": null, "total": null}
+  ]
+}
