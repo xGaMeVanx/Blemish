@@ -349,52 +349,89 @@ PAGINA = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Blemish — humaniza tu texto</title>
 <style>
-  :root { color-scheme: light dark; }
+  :root {
+    color-scheme: light;
+    --bg: #f6f5fb;
+    --superficie: #ffffff;
+    --borde: #e3e0f0;
+    --texto: #211f33;
+    --texto-tenue: #6b6880;
+    --acento: #7c5cf0;
+    --acento-oscuro: #6a48e6;
+    --acento-tenue: #f1eefe;
+    --error: #d1435b;
+    --error-bg: #fdeef1;
+  }
   * { box-sizing: border-box; }
   body { font-family: system-ui, sans-serif; min-height: 100vh; margin: 0;
+         background: var(--bg); color: var(--texto);
          display: flex; flex-direction: column; }
-  header { max-width: 46rem; width: 100%; margin: 0 auto; padding: 1.25rem 1rem 0; }
-  h1 { font-size: 1.6rem; margin: 0 0 .15rem; }
-  header p { margin: 0; opacity: .75; }
-  main { flex: 1; max-width: 46rem; width: 100%; margin: 0 auto;
-         padding: 1rem 1rem 2rem; display: flex; flex-direction: column;
-         gap: .7rem; }
-  textarea { width: 100%; min-height: 9rem; resize: vertical; padding: .75rem;
-             font: inherit; line-height: 1.5; border: 1px solid #8888;
-             border-radius: .75rem; background: transparent; color: inherit; }
-  .tonos { display: flex; flex-wrap: wrap; gap: .45rem; }
-  .tono { padding: .45rem 1rem; border: 1px solid #8888; border-radius: 1.5rem;
-          background: transparent; color: inherit; cursor: pointer; }
-  .tono.activo { background: #7c5cf0; border-color: #7c5cf0; color: #fff; }
-  #humanizar { padding: .7rem 1.5rem; border: 0; border-radius: 1.5rem;
-               background: #7c5cf0; color: #fff; cursor: pointer; }
+  header { max-width: 40rem; width: 100%; margin: 0 auto; padding: 2.25rem 1.25rem .5rem;
+            text-align: center; }
+  h1 { font-size: 1.9rem; margin: 0 0 .3rem; letter-spacing: -.02em; color: var(--acento-oscuro); }
+  header p { margin: 0; color: var(--texto-tenue); }
+  main { flex: 1; max-width: 40rem; width: 100%; margin: 0 auto;
+         padding: 1.25rem 1.25rem 3rem; display: flex; flex-direction: column;
+         gap: 1rem; }
+  .tarjeta { background: var(--superficie); border: 1px solid var(--borde);
+             border-radius: 1rem; padding: 1.25rem;
+             box-shadow: 0 1px 2px rgba(33, 31, 51, .04), 0 8px 24px rgba(33, 31, 51, .05);
+             display: flex; flex-direction: column; gap: 1rem; }
+  textarea { width: 100%; min-height: 9rem; resize: vertical; padding: .85rem;
+             font: inherit; line-height: 1.55; border: 1px solid var(--borde);
+             border-radius: .75rem; background: var(--bg); color: inherit; }
+  textarea:focus { outline: none; border-color: var(--acento); background: var(--superficie);
+                   box-shadow: 0 0 0 3px var(--acento-tenue); }
+  .tonos { display: flex; flex-wrap: wrap; gap: .5rem; }
+  .tono { padding: .45rem 1.05rem; border: 1px solid var(--borde); border-radius: 1.5rem;
+          background: var(--superficie); color: var(--texto-tenue); cursor: pointer;
+          font: inherit; font-size: .9rem; transition: background .15s, border-color .15s, color .15s; }
+  .tono:hover { border-color: var(--acento); color: var(--acento-oscuro); }
+  .tono.activo { background: var(--acento); border-color: var(--acento); color: #fff; }
+  #humanizar { padding: .75rem 1.5rem; border: 0; border-radius: .75rem;
+               background: var(--acento); color: #fff; cursor: pointer;
+               font: inherit; font-size: 1rem; font-weight: 600;
+               transition: background .15s; }
+  #humanizar:hover:not(:disabled) { background: var(--acento-oscuro); }
   #humanizar:disabled { opacity: .5; cursor: wait; }
-  #error { display: none; color: #e74c3c; margin: 0; white-space: pre-wrap; }
+  #error { display: none; color: var(--error); background: var(--error-bg);
+           border-radius: .6rem; margin: 0; padding: .6rem .85rem;
+           white-space: pre-wrap; font-size: .9rem; }
+  #copiar { align-self: flex-start; padding: .5rem 1.1rem; border-radius: .75rem;
+            border: 1px solid var(--acento); background: var(--superficie);
+            color: var(--acento-oscuro); cursor: pointer; font: inherit;
+            font-size: .9rem; transition: background .15s; }
+  #copiar:hover { background: var(--acento-tenue); }
   .oculto { display: none !important; }
 </style>
 </head>
 <body>
   <header>
     <h1>Blemish</h1>
-    <p>Pega tu texto, elige un tono y dale vida. Ctrl+V pega y Ctrl+Z deshace, como siempre.</p>
+    <p>Pega tu texto, elige un tono y dale vida.</p>
   </header>
   <main>
-    <textarea id="entrada" placeholder="Pega aquí el texto que quieres humanizar..."></textarea>
-    <div class="tonos" id="tonos">
-      <button type="button" class="tono activo" data-tono="formal">Formal</button>
-      <button type="button" class="tono" data-tono="cientifico">Científico</button>
-      <button type="button" class="tono" data-tono="tarea">Tarea</button>
-      <button type="button" class="tono" data-tono="casual">Casual</button>
+    <div class="tarjeta">
+      <textarea id="entrada" placeholder="Pega aquí el texto que quieres humanizar..."></textarea>
+      <div class="tonos" id="tonos">
+        <button type="button" class="tono activo" data-tono="formal">Formal</button>
+        <button type="button" class="tono" data-tono="cientifico">Científico</button>
+        <button type="button" class="tono" data-tono="tarea">Tarea</button>
+        <button type="button" class="tono" data-tono="casual">Casual</button>
+      </div>
+      <button id="humanizar" type="button">Humanizar</button>
+      <p id="error"></p>
     </div>
-    <button id="humanizar" type="button">Humanizar</button>
-    <p id="error"></p>
-    <textarea id="salida" class="oculto" readonly placeholder="Tu texto humanizado aparecerá aquí..."></textarea>
-    <button id="copiar" type="button" class="oculto">Copiar resultado</button>
+    <div id="resultado" class="tarjeta oculto">
+      <textarea id="salida" readonly placeholder="Tu texto humanizado aparecerá aquí..."></textarea>
+      <button id="copiar" type="button">Copiar resultado</button>
+    </div>
   </main>
 <script>
 const entrada = document.getElementById("entrada");
 const tonos = document.getElementById("tonos");
 const boton = document.getElementById("humanizar");
+const resultado = document.getElementById("resultado");
 const salida = document.getElementById("salida");
 const copiar = document.getElementById("copiar");
 const error = document.getElementById("error");
@@ -419,8 +456,7 @@ async function humanizar() {
     return;
   }
   error.style.display = "none";
-  salida.classList.add("oculto");
-  copiar.classList.add("oculto");
+  resultado.classList.add("oculto");
   boton.disabled = true;
   try {
     const peticion = await fetch("/humanizar", {
@@ -435,8 +471,7 @@ async function humanizar() {
       throw e;
     }
     salida.value = datos.texto_humanizado;
-    salida.classList.remove("oculto");
-    copiar.classList.remove("oculto");
+    resultado.classList.remove("oculto");
   } catch (err) {
     error.textContent = (err.status === 429)
       ? err.message
