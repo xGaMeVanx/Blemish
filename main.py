@@ -25,6 +25,7 @@ Para correrlo:
 
 import os
 import pathlib
+import re
 import sqlite3
 import threading
 import time
@@ -99,8 +100,10 @@ REGLAS = (
     "una persona real, conservando TODO el significado, los datos, los "
     "nombres y las ideas originales. Nunca inventes información, no cambies "
     "el sentido y no dejes fuera contenido importante. La respuesta es SOLO "
-    "el texto humanizado: sin títulos, sin comentarios, sin explicaciones y "
-    "sin repetir el texto original."
+    "el texto humanizado: sin títulos, sin comentarios, sin explicaciones, "
+    "sin markdown (nada de #, *, **, `, - ni enlaces) y sin repetir el texto "
+    "original. Párrafos separados por una línea en blanco y sin dobles "
+    "espacios."
 )
 
 # --- Sesiones: tope de uso y cierre por inactividad --------------------------
@@ -238,6 +241,53 @@ def buscar_referencias(texto):
 # =====================================================================================
 
 
+def limpiar_texto(texto):
+    """Quita restos de markdown y normaliza espacios para pegar en Word."""
+    lineas = []
+    for linea in texto.split("\n"):
+        linea = linea.strip()
+        if not linea:
+            continue
+        # Encabezados, citas y marcadores de lista que el modelo pueda dejar.
+        linea = re.sub(r"^(#{1,6})\s+", "", linea)
+        linea = re.sub(r"^>\s?", "", linea)
+        linea = re.sub(r"^([-*+]|\d{1,3}\.)\s+", "", linea)
+        # Reglas horizontales (---, ***, ===) en su propia línea.
+        if re.fullmatch(r"[-*_=\s]{3,}", linea):
+            continue
+        # Negritas (**x**, __x__) y código (`x`): se quita la marca, queda el texto.
+        linea = re.sub(r"\*\*|__", "", linea)
+        linea = re.sub(r"`([^`]*)`", r"\1", linea)
+        # Enlaces [texto](url) → texto.
+        linea = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", linea)
+        # Énfasis suave (*x*, _x_) solo con límites de espacio, para no tocar
+        # "3*4" ni palabras con guion bajo.
+        linea = re.sub(r"(?<!\S)\*([^*\n]+)\*(?!\S)", r"\1", linea)
+        linea = re.sub(r"(?<!\S)_([^_\n]+)_(?!\S)", r"\1", linea)
+        # Dobles espacios y tabuladores → un solo espacio.
+        linea = re.sub(r"[ \t]{2,}", " ", linea).strip()
+        lineas.append(linea)
+    return "\n".join(lineas)
+
+
+def a_rtf(texto):
+    """Texto limpio → RTF con Times New Roman a 12pt, para pegar en .docx."""
+    parrafos = [p for p in (p.strip() for p in texto.split("\n")) if p]
+    cuerpo = (
+        p.replace("\\", "\\\\")
+        .replace("{", "\\{")
+        .replace("}", "\\}")
+        .replace("\r", "")
+        for p in parrafos
+    )
+    return (
+        r"{\rtf1\ansi\deff0{\fonttbl{\f0\froman Times New Roman;}}"
+        r"\f0\fs24\lang3082 "
+        + r"\par ".join(cuerpo)
+        + r"\par}"
+    )
+
+
 def humanizar(texto, tono):
     """Reescribe `texto` en el tono elegido. Devuelve (texto, nº de referencias)."""
     if cliente is None:
@@ -269,7 +319,7 @@ def humanizar(texto, tono):
         ],
         temperature=TEMPERATURA,
     )
-    return respuesta.choices[0].message.content.strip(), len(referencias)
+    return limpiar_texto(respuesta.choices[0].message.content), len(referencias)
 
 
 # =====================================================================================
@@ -295,6 +345,7 @@ class Peticion(BaseModel):
 
 class Respuesta(BaseModel):
     texto_humanizado: str
+    texto_rtf: str
     tono: str
     referencias_usadas: int
     session_id: str
@@ -323,6 +374,7 @@ def humanizar_endpoint(peticion: Peticion):
 
     try:
         texto_humanizado, cuantas = humanizar(peticion.texto, tono)
+        texto_humanizado = limpiar_texto(texto_humanizado)
     except RuntimeError as error:
         raise HTTPException(status_code=503, detail=str(error))
     except Exception as error:
@@ -330,6 +382,7 @@ def humanizar_endpoint(peticion: Peticion):
 
     return Respuesta(
         texto_humanizado=texto_humanizado,
+        texto_rtf=a_rtf(texto_humanizado),
         tono=tono,
         referencias_usadas=cuantas,
         session_id=session_id,
@@ -433,7 +486,7 @@ PAGINA = """<!doctype html>
       </div>
       <div class="tarjeta">
         <textarea id="salida" readonly placeholder="Tu texto humanizado aparecerá aquí..."></textarea>
-        <button id="copiar" type="button" class="oculto">Copiar resultado</button>
+        <button id="copiar" type="button" class="oculto">Copiar resultado (Times New Roman)</button>
       </div>
     </div>
   </main>
@@ -445,6 +498,7 @@ const salida = document.getElementById("salida");
 const copiar = document.getElementById("copiar");
 const error = document.getElementById("error");
 let tono = "formal";
+let ultimoRtf = null;
 let sessionId = localStorage.getItem("blemish_sesion") ||
                 (crypto.randomUUID ? crypto.randomUUID() : (Date.now().toString(36) + Math.random().toString(36).slice(2)));
 localStorage.setItem("blemish_sesion", sessionId);
@@ -481,6 +535,7 @@ async function humanizar() {
       throw e;
     }
     salida.value = datos.texto_humanizado;
+    ultimoRtf = datos.texto_rtf || null;
     copiar.classList.remove("oculto");
   } catch (err) {
     error.textContent = (err.status === 429)
@@ -500,13 +555,23 @@ entrada.addEventListener("keydown", (evento) => {
 
 copiar.addEventListener("click", async () => {
   try {
-    await navigator.clipboard.writeText(salida.value);
-    copiar.textContent = "¡Copiado!";
-    setTimeout(() => { copiar.textContent = "Copiar resultado"; }, 1500);
+    if (ultimoRtf && navigator.clipboard.write && window.ClipboardItem) {
+      // Copia con formato RTF (Times New Roman) para pegar en Word, con
+      // texto plano de respaldo para cualquier otro destino.
+      const rtf = new Blob([ultimoRtf], {type: "text/rtf"});
+      const plano = new Blob([salida.value], {type: "text/plain"});
+      await navigator.clipboard.write([
+        new ClipboardItem({"text/rtf": rtf, "text/plain": plano})
+      ]);
+    } else {
+      await navigator.clipboard.writeText(salida.value);
+    }
   } catch {
     salida.select();
     document.execCommand("copy");
   }
+  copiar.textContent = "¡Copiado!";
+  setTimeout(() => { copiar.textContent = "Copiar resultado (Times New Roman)"; }, 1500);
 });
 </script>
 </body>
