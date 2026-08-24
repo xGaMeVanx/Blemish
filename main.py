@@ -431,9 +431,9 @@ PAGINA = """<!doctype html>
         <button id="humanizar" type="button">Humanizar</button>
         <p id="error"></p>
       </div>
-      <div id="resultado" class="tarjeta oculto">
+      <div class="tarjeta">
         <textarea id="salida" readonly placeholder="Tu texto humanizado aparecerá aquí..."></textarea>
-        <button id="copiar" type="button">Copiar resultado</button>
+        <button id="copiar" type="button" class="oculto">Copiar resultado</button>
       </div>
     </div>
   </main>
@@ -441,7 +441,6 @@ PAGINA = """<!doctype html>
 const entrada = document.getElementById("entrada");
 const tonos = document.getElementById("tonos");
 const boton = document.getElementById("humanizar");
-const resultado = document.getElementById("resultado");
 const salida = document.getElementById("salida");
 const copiar = document.getElementById("copiar");
 const error = document.getElementById("error");
@@ -466,7 +465,8 @@ async function humanizar() {
     return;
   }
   error.style.display = "none";
-  resultado.classList.add("oculto");
+  salida.value = "";
+  copiar.classList.add("oculto");
   boton.disabled = true;
   try {
     const peticion = await fetch("/humanizar", {
@@ -481,7 +481,7 @@ async function humanizar() {
       throw e;
     }
     salida.value = datos.texto_humanizado;
-    resultado.classList.remove("oculto");
+    copiar.classList.remove("oculto");
   } catch (err) {
     error.textContent = (err.status === 429)
       ? err.message
