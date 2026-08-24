@@ -2,7 +2,7 @@
 Copyright Mario Aguirre Rivera. Licenciado bajo PolyForm Noncommercial 1.0.0
 (https://polyformproject.org/licenses/noncommercial/1.0.0). Ver LICENSE.
 
-Ingesta de la biblioteca de LLMario — genera indice.sqlite.
+Ingesta de la base de referencia — genera indice.sqlite.
 
 Lee archivos de conocimiento desde referencia/ (los textos de estilo que
 Blemish imita) y docs/ en estos formatos:
@@ -296,7 +296,7 @@ def _insertar(db, fragmento, vector):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Genera indice.sqlite con la biblioteca de LLMario"
+        description="Genera indice.sqlite con la base de referencia"
     )
     parser.add_argument(
         "--solo-probar",

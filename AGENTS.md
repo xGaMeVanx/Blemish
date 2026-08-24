@@ -6,12 +6,12 @@ text, picks an output tone (Formal, Científico, Tarea, Casual) and gets a
 "humanized" rewrite, drawing on a **reference base** of texts whose style the
 model imitates.
 
-The codebase was copied from LLMario (commit `066dc28`) and adapted into
-Blemish v1: the business tools (`calcular_precio`, `consultar_stock`),
+Blemish v1 was adapted from an earlier codebase (initial commit `066dc28`):
+the business tools (`calcular_precio`, `consultar_stock`),
 `negocio.json`, chat history (`conversaciones.sqlite`), and the tool-calling
-agent loop are **gone**; the Mario persona was reworked into a fun, sarcastic
-voice (`personalidad.md`) and the chat page was replaced by a paste-and-go
-UI. The only remaining LLMario trace is `ingesta.py`'s module docstring.
+agent loop are **gone**; the original assistant persona was reworked into a
+fun, sarcastic voice (`personalidad.md`) and the chat page was replaced by a
+paste-and-go UI.
 
 Single Python service: FastAPI app + one LLM call per request + inline HTML
 page, all in `main.py`; the reference corpus is built by `ingesta.py` into
@@ -58,12 +58,11 @@ referencia/ + docs/ ──► ingesta.py ──► indice.sqlite (fragmentos + v
   timeout), `buscar_referencias` (vector search into the reference base),
   `humanizar` (one Groq call), FastAPI routes, and the inline HTML page
   (`PAGINA`). Loads `personalidad.md` and `indice.sqlite` at import time.
-- **ingesta.py** — unchanged from the LLMario base: reads `referencia/` (the
-  user's style texts) plus `docs/`; extraction pipeline
-  (PDF/EPUB/DOCX/DOC/TXT/MD), chunking (~1200 chars / 200 overlap), Gemini
-  embeddings (`gemini-embedding-001`, 768-dim, `RETRIEVAL_DOCUMENT`), writes
-  `indice.sqlite`. Unlinks and rebuilds the DB on every run; sleeps 0.25 s
-  between embeddings (free-tier rate limit).
+- **ingesta.py** — reads `referencia/` (the user's style texts) plus `docs/`;
+  extraction pipeline (PDF/EPUB/DOCX/DOC/TXT/MD), chunking (~1200 chars / 200
+  overlap), Gemini embeddings (`gemini-embedding-001`, 768-dim,
+  `RETRIEVAL_DOCUMENT`), writes `indice.sqlite`. Unlinks and rebuilds the DB on
+  every run; sleeps 0.25 s between embeddings (free-tier rate limit).
 - **personalidad.md** — the voice: fun and sarcastic, injected into the system
   prompt. The tone instructions and the humanizing rules live in `main.py`
   (`TONOS`, `REGLAS`).
@@ -95,7 +94,7 @@ Tone input is normalized (lowercase, accents stripped) so "Científico" works.
 - `requirements.txt` — the single dependency source, all `==`-pinned.
 - `render.yaml` — Render blueprint; service name `blemish`.
 - `.gitignore` — `.env`/`*.env`, `biblioteca/` and `conversaciones.sqlite`
-  (vestigial LLMario lines), and `.codewhale/` (except the versioned
+  (vestigial lines), and `.codewhale/` (except the versioned
   `.codewhale/constitution.json`). `indice.sqlite` is **not** ignored — the
   README's Render flow requires generating and committing it before deploying.
   `referencia/` is **not** ignored either: the user's texts travel with the
@@ -128,8 +127,7 @@ Tone input is normalized (lowercase, accents stripped) so "Científico" works.
 - Single `main` branch; commits land directly on it. No PRs or feature branches.
 - Commit style: `<area>: <description>` in lowercase Spanish, present tense —
   `web: ...`, `persona: ...`, `chore: ...`, `README: ...`. No ticket refs.
-- History currently contains only `066dc28 chore: base inicial de humanizar
-  copiada de llm`.
+- History starts at the initial commit `066dc28` and is never rewritten.
 
 ## CI/CD
 
@@ -142,8 +140,7 @@ No CI config in the repo. Deployment is Render (`render.yaml`): builds with
 ## Tips for AI Agents
 
 - **Name state**: public name is **Blemish**; checkout dir is `humanizar`.
-  The only remaining LLMario trace is `ingesta.py`'s module docstring. Don't
-  rename piecemeal without deciding scope.
+  No legacy names or branding remain; keep it that way.
 - **Never hand-edit** generated data: `indice.sqlite` (rebuild with
   `ingesta.py`). `referencia/` is user-owned input — don't modify, delete, or
   add files there without being asked.
