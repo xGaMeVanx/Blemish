@@ -29,7 +29,13 @@ import argparse
 import os
 import pathlib
 import shutil
-import sqlite3
+
+# En Linux (Render) el sqlite3 estándar viene sin soporte para cargar
+# extensiones (necesario para sqlite_vec); pysqlite3-binary sí lo permite.
+try:
+    import pysqlite3 as sqlite3
+except ImportError:
+    import sqlite3
 import subprocess
 import sys
 import time

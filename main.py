@@ -26,7 +26,14 @@ Para correrlo:
 import os
 import pathlib
 import re
-import sqlite3
+
+# En Linux (Render) el sqlite3 estándar viene compilado sin soporte para
+# cargar extensiones, y sqlite_vec necesita cargar la suya (enable_load_extension).
+# pysqlite3-binary sí lo permite; en Windows local se usa el sqlite3 estándar.
+try:
+    import pysqlite3 as sqlite3
+except ImportError:
+    import sqlite3
 import threading
 import time
 import unicodedata
